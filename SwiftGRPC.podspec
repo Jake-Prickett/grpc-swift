@@ -43,7 +43,7 @@ Pod::Spec.new do |s|
     s.dependency 'SwiftNIO', '~> 2.0'
     s.dependency 'SwiftNIOHTTP2', '~> 1.0'
     s.dependency 'SwiftNIOTLS', '~> 2.0'
-    s.dependency 'SwiftNIOSSL', '~> 2.0'
+    # s.dependency 'SwiftNIOSSL', '~> 2.0'
     s.dependency 'SwiftNIOTransportServices', '~> 1.0'
     s.dependency 'SwiftProtobuf', '~> 1.7.0'
     s.dependency 'Logging', '~> 1.0'
