@@ -111,12 +111,85 @@ class GRPCCustomPayloadTests: GRPCTestCase {
     XCTAssertEqual(actual.message, "egassem")
     XCTAssertEqual(actual.number, 43)
   }
+
+  func testCustomPayloadUnary() throws {
+    let rpc: UnaryCall<StringPayload, StringPayload> = self.client.makeUnaryCall(
+      path: "/CustomPayload/Reverse",
+      request: StringPayload(message: "foobarbaz")
+    )
+
+    XCTAssertEqual(try rpc.response.map { $0.message }.wait(), "zabraboof")
+    XCTAssertEqual(try rpc.status.map { $0.code }.wait(), .ok)
+  }
+
+  func testCustomPayloadClientStreaming() throws {
+    let rpc: ClientStreamingCall<StringPayload, StringPayload> = self.client.makeClientStreamingCall(path: "/CustomPayload/ReverseThenJoin")
+    rpc.sendMessages(["foo", "bar", "baz"].map(StringPayload.init(message:)), promise: nil)
+    rpc.sendEnd(promise: nil)
+
+    XCTAssertEqual(try rpc.response.map { $0.message }.wait(), "baz bar foo")
+    XCTAssertEqual(try rpc.status.map { $0.code }.wait(), .ok)
+  }
+
+  func testCustomPayloadServerStreaming() throws {
+    let message = "abc"
+    var expectedIterator = message.reversed().makeIterator()
+
+    let rpc: ServerStreamingCall<StringPayload, StringPayload> = self.client.makeServerStreamingCall(
+      path: "/CustomPayload/ReverseThenSplit",
+      request: StringPayload(message: message)
+    ) { response in
+      if let next = expectedIterator.next() {
+        XCTAssertEqual(String(next), response.message)
+      } else {
+        XCTFail("Unexpected message: \(response.message)")
+      }
+    }
+
+    XCTAssertEqual(try rpc.status.map { $0.code }.wait(), .ok)
+  }
 }
 
 // MARK: Custom Payload Service
 
 fileprivate class CustomPayloadProvider: CallHandlerProvider {
   var serviceName: String = "CustomPayload"
+
+  fileprivate func reverseString(
+    request: StringPayload,
+    context: UnaryResponseCallContext<StringPayload>
+  ) -> EventLoopFuture<StringPayload> {
+    let reversed = StringPayload(message: String(request.message.reversed()))
+    return context.eventLoop.makeSucceededFuture(reversed)
+  }
+
+  fileprivate func reverseThenJoin(
+    context: UnaryResponseCallContext<StringPayload>
+  ) -> EventLoopFuture<(StreamEvent<StringPayload>) -> Void> {
+    var messages: [String] = []
+
+    return context.eventLoop.makeSucceededFuture({ event in
+      switch event {
+      case .message(let request):
+        messages.append(request.message)
+
+      case .end:
+        let response = messages.reversed().joined(separator: " ")
+        context.responsePromise.succeed(StringPayload(message: response))
+      }
+    })
+  }
+
+  fileprivate func reverseThenSplit(
+    request: StringPayload,
+    context: StreamingResponseCallContext<StringPayload>
+  ) -> EventLoopFuture<GRPCStatus> {
+    let responses = request.message.reversed().map {
+      context.sendResponse(StringPayload(message: String($0)))
+    }
+
+    return EventLoopFuture.andAllSucceed(responses, on: context.eventLoop).map { .ok }
+  }
 
   // Bidirectional RPC which returns a new `CustomPayload` for each `CustomPayload` received.
   // The returned payloads have their `message` reversed and their `number` incremented by one.
@@ -140,8 +213,27 @@ fileprivate class CustomPayloadProvider: CallHandlerProvider {
 
   func handleMethod(_ methodName: String, callHandlerContext: CallHandlerContext) -> GRPCCallHandler? {
     switch methodName {
+    case "Reverse":
+      return CallHandlerFactory.makeUnary(callHandlerContext: callHandlerContext) { context in
+        return { request in
+          return self.reverseString(request: request, context: context)
+        }
+      }
+
+    case "ReverseThenJoin":
+      return CallHandlerFactory.makeClientStreaming(callHandlerContext: callHandlerContext) { context in
+        return self.reverseThenJoin(context: context)
+      }
+
+    case "ReverseThenSplit":
+      return CallHandlerFactory.makeServerStreaming(callHandlerContext: callHandlerContext) { context in
+        return { request in
+          return self.reverseThenSplit(request: request, context: context)
+        }
+      }
+
     case "AddOneAndReverseMessage":
-      return BidirectionalStreamingCallHandler<CustomPayload, CustomPayload>(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeBidirectionalStreaming(callHandlerContext: callHandlerContext) { context in
         return self.addOneAndReverseMessage(context: context)
       }
 
@@ -198,5 +290,21 @@ fileprivate struct CustomPayload: GRPCPayload, Equatable {
     buffer.writeInteger(UInt32(self.message.count))
     buffer.writeString(self.message)
     buffer.writeInteger(self.number)
+  }
+}
+
+fileprivate struct StringPayload: GRPCPayload {
+  var message: String
+
+  init(message: String) {
+    self.message = message
+  }
+
+  init(serializedByteBuffer: inout ByteBuffer) throws {
+    self.message = serializedByteBuffer.readString(length: serializedByteBuffer.readableBytes)!
+  }
+
+  func serialize(into buffer: inout ByteBuffer) throws {
+    buffer.writeString(self.message)
   }
 }

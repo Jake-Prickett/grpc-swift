@@ -617,6 +617,131 @@ extension ConnectionManagerTests {
       XCTAssertNoThrow(try shutdown.wait())
     }
   }
+
+  func testDoomedOptimisticChannelFromIdle() {
+    let manager = ConnectionManager.testingOnly(configuration: self.defaultConfiguration, logger: self.logger) {
+      return self.loop.makeFailedFuture(DoomedChannelError())
+    }
+    let candidate = manager.getOptimisticChannel()
+    self.loop.run()
+    XCTAssertThrowsError(try candidate.wait())
+  }
+
+  func testDoomedOptimisticChannelFromConnecting() throws {
+    let promise = self.loop.makePromise(of: Channel.self)
+    let manager = ConnectionManager.testingOnly(configuration: self.defaultConfiguration, logger: self.logger) {
+      return promise.futureResult
+    }
+
+    self.waitForStateChange(from: .idle, to: .connecting) {
+      // Trigger channel creation, and a connection attempt, we don't care about the channel.
+      _ = manager.getChannel()
+      self.loop.run()
+    }
+
+    // We're connecting: get an optimistic channel.
+    let optimisticChannel = manager.getOptimisticChannel()
+    self.loop.run()
+
+    // Fail the promise.
+    promise.fail(DoomedChannelError())
+
+    XCTAssertThrowsError(try optimisticChannel.wait())
+  }
+
+  func testOptimisticChannelFromTransientFailure() throws {
+    var configuration = self.defaultConfiguration
+    configuration.connectionBackoff = ConnectionBackoff()
+
+    let manager = ConnectionManager.testingOnly(configuration: configuration, logger: self.logger) {
+      return self.loop.makeFailedFuture(DoomedChannelError())
+    }
+
+    self.waitForStateChanges([
+      Change(from: .idle, to: .connecting),
+      Change(from: .connecting, to: .transientFailure)
+    ]) {
+      // Trigger channel creation, and a connection attempt, we don't care about the channel.
+      _ = manager.getChannel()
+      self.loop.run()
+    }
+
+    // Now we're sitting in transient failure. Get a channel optimistically.
+    let optimisticChannel = manager.getOptimisticChannel()
+    self.loop.run()
+
+    XCTAssertThrowsError(try optimisticChannel.wait())
+  }
+
+  func testOptimisticChannelFromShutdown() throws {
+    let manager = ConnectionManager.testingOnly(configuration: self.defaultConfiguration, logger: self.logger) {
+      return self.loop.makeFailedFuture(DoomedChannelError())
+    }
+
+    let shutdown = manager.shutdown()
+    self.loop.run()
+    XCTAssertNoThrow(try shutdown.wait())
+
+    // Get a channel optimistically. It'll fail, obviously.
+    let channel = manager.getOptimisticChannel()
+    self.loop.run()
+    XCTAssertThrowsError(try channel.wait())
+  }
+
+  func testDoubleIdle() throws {
+    class CloseDroppingHandler: ChannelOutboundHandler {
+      typealias OutboundIn = Any
+      func close(context: ChannelHandlerContext, mode: CloseMode, promise: EventLoopPromise<Void>?) {
+        promise?.fail(GRPCStatus(code: .unavailable, message: "Purposefully dropping channel close"))
+      }
+    }
+
+    let channelPromise = self.loop.makePromise(of: Channel.self)
+    let manager = ConnectionManager.testingOnly(configuration: self.defaultConfiguration, logger: self.logger) {
+      return channelPromise.futureResult
+    }
+
+    // Start the connection.
+    let readyChannel: EventLoopFuture<Channel> = self.waitForStateChange(from: .idle, to: .connecting) {
+      let readyChannel = manager.getChannel()
+      self.loop.run()
+      return readyChannel
+    }
+
+    // Setup the real channel and activate it.
+    let channel = EmbeddedChannel(loop: self.loop)
+    XCTAssertNoThrow(try channel.pipeline.addHandlers([
+      CloseDroppingHandler(),
+      GRPCIdleHandler(mode: .client(manager))
+    ]).wait())
+    channelPromise.succeed(channel)
+    self.loop.run()
+    XCTAssertNoThrow(try channel.connect(to: SocketAddress(unixDomainSocketPath: "/ignored")).wait())
+
+    // Write a SETTINGS frame on the root stream.
+    try self.waitForStateChange(from: .connecting, to: .ready) {
+      let frame = HTTP2Frame(streamID: .rootStream, payload: .settings(.settings([])))
+      XCTAssertNoThrow(try channel.writeInbound(frame))
+    }
+
+    // The channel should now be ready.
+    XCTAssertNoThrow(try readyChannel.wait())
+
+    // Send a GO_AWAY; the details don't matter. This will cause the connection to go idle and the
+    // channel to close.
+    try self.waitForStateChange(from: .ready, to: .idle) {
+      let goAway = HTTP2Frame(
+        streamID: .rootStream,
+        payload: .goAway(lastStreamID: 1, errorCode: .noError, opaqueData: nil)
+      )
+      XCTAssertNoThrow(try channel.writeInbound(goAway))
+    }
+
+    // We dropped the close; now wait for the scheduled idle to fire.
+    //
+    // Previously doing this this would fail a precondition.
+    self.loop.advanceTime(by: .minutes(5))
+  }
 }
 
 internal struct Change: Hashable, CustomStringConvertible {

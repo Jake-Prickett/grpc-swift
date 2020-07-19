@@ -55,15 +55,15 @@ public enum GRPCError {
 
 /// The RPC did not complete before the timeout.
   public struct RPCTimedOut: GRPCErrorProtocol {
-    /// The timeout used for the RPC.
-    public var timeout: GRPCTimeout
+    /// The time limit which was exceeded by the RPC.
+    public var timeLimit: TimeLimit
 
-    public init(_ timeout: GRPCTimeout) {
-      self.timeout = timeout
+    public init(_ timeLimit: TimeLimit) {
+      self.timeLimit = timeLimit
     }
 
     public var description: String {
-      return "RPC timed out (timeout=\(self.timeout.wireEncoding)) before completing"
+      return "RPC timed out before completing (\(self.timeLimit))"
     }
 
     public func makeGRPCStatus() -> GRPCStatus {
@@ -163,19 +163,16 @@ public enum GRPCError {
   /// Too many, or too few, messages were sent over the given stream.
   public struct StreamCardinalityViolation: GRPCErrorProtocol {
     /// The stream on which there was a cardinality violation.
-    public var stream: GRPCStreamType
+    public let description: String
 
-    public init(stream: GRPCStreamType) {
-      self.stream = stream
-    }
+    /// A request stream cardinality violation.
+    public static let request = StreamCardinalityViolation("Request stream cardinality violation")
 
-    public var description: String {
-      switch self.stream {
-      case .request:
-        return "Request stream cardinality violation"
-      case .response:
-        return "Response stream cardinality violation"
-      }
+    /// A response stream cardinality violation.
+    public static let response = StreamCardinalityViolation("Response stream cardinality violation")
+
+    private init(_ description: String) {
+      self.description = description
     }
 
     public func makeGRPCStatus() -> GRPCStatus {
@@ -295,13 +292,6 @@ extension GRPCErrorProtocol {
   ) -> GRPCError.WithContext {
     return GRPCError.WithContext(self, file: file, line: line, function: function)
   }
-}
-
-/// The type of stream. Messages are sent from the client to the server on the request stream, and
-/// from the server to the client on the response stream.
-public enum GRPCStreamType {
-  case request
-  case response
 }
 
 extension GRPCStatus.Code {

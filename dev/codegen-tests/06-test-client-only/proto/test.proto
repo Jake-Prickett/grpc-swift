@@ -15,6 +15,14 @@ syntax = "proto3";
 
 package codegentest;
 
-message Foo {
-  string bar = 1;
+service Foo {
+  rpc Bar(BarRequest) returns (BarResponse) {}
+}
+
+message BarRequest {
+  string text = 1;
+}
+
+message BarResponse {
+  string text = 1;
 }

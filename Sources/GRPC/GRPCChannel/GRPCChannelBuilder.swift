@@ -13,6 +13,7 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
+import Dispatch
 import NIO
 import NIOSSL
 
@@ -36,7 +37,10 @@ extension ClientConnection {
     private var connectionBackoffIsEnabled = true
     private var errorDelegate: ClientErrorDelegate?
     private var connectivityStateDelegate: ConnectivityStateDelegate?
+    private var connectivityStateDelegateQueue: DispatchQueue?
+    private var connectionKeepalive = ClientConnectionKeepalive()
     private var connectionIdleTimeout: TimeAmount = .minutes(5)
+    private var callStartBehavior: CallStartBehavior = .waitsForConnectivity
     private var httpTargetWindowSize: Int = 65535
 
     fileprivate init(group: EventLoopGroup) {
@@ -49,9 +53,12 @@ extension ClientConnection {
         eventLoopGroup: self.group,
         errorDelegate: self.errorDelegate,
         connectivityStateDelegate: self.connectivityStateDelegate,
+        connectivityStateDelegateQueue: self.connectivityStateDelegateQueue,
         tls: self.maybeTLS,
         connectionBackoff: self.connectionBackoffIsEnabled ? self.connectionBackoff : nil,
+        connectionKeepalive: self.connectionKeepalive,
         connectionIdleTimeout: self.connectionIdleTimeout,
+        callStartBehavior: self.callStartBehavior,
         httpTargetWindowSize: self.httpTargetWindowSize
       )
       return ClientConnection(configuration: configuration)
@@ -143,6 +150,15 @@ extension ClientConnection.Builder {
     return self
   }
 
+  /// Sets a custom configuration for keepalive
+  /// The defaults for client and server are determined by the gRPC keepalive
+  /// [documentation] (https://github.com/grpc/grpc/blob/master/doc/keepalive.md).
+  @discardableResult
+  public func withKeepalive(_ keepalive: ClientConnectionKeepalive) -> Self {
+    self.connectionKeepalive = keepalive
+    return self
+  }
+
   /// The amount of time to wait before closing the connection. The idle timeout will start only
   /// if there are no RPCs in progress and will be cancelled as soon as any RPCs start. If a
   /// connection becomes idle, starting a new RPC will automatically create a new connection.
@@ -150,6 +166,15 @@ extension ClientConnection.Builder {
   @discardableResult
   public func withConnectionIdleTimeout(_ timeout: TimeAmount) -> Self {
     self.connectionIdleTimeout = timeout
+    return self
+  }
+
+  /// The behavior used to determine when an RPC should start. That is, whether it should wait for
+  /// an active connection or fail quickly if no connection is currently available. Calls will
+  /// use `.waitsForConnectivity` by default.
+  @discardableResult
+  public func withCallStartBehavior(_ behavior: CallStartBehavior) -> Self {
+    self.callStartBehavior = behavior
     return self
   }
 }
@@ -164,10 +189,16 @@ extension ClientConnection.Builder {
 }
 
 extension ClientConnection.Builder {
-  /// Sets the client connectivity state delegate.
+  /// Sets the client connectivity state delegate and the `DispatchQueue` on which the delegate
+  /// should be called. If no `queue` is provided then gRPC will create a `DispatchQueue` on which
+  /// to run the delegate.
   @discardableResult
-  public func withConnectivityStateDelegate(_ delegate: ConnectivityStateDelegate?) -> Self {
+  public func withConnectivityStateDelegate(
+    _ delegate: ConnectivityStateDelegate?,
+    executingOn queue: DispatchQueue? = nil
+  ) -> Self {
     self.connectivityStateDelegate = delegate
+    self.connectivityStateDelegateQueue = queue
     return self
   }
 }

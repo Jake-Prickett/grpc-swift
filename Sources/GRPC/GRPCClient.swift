@@ -15,12 +15,10 @@
  */
 import NIO
 import NIOHTTP2
+import SwiftProtobuf
 
 /// A gRPC client.
 public protocol GRPCClient {
-  /// Initialize the client with the given channel and default call options.
-  init(channel: GRPCChannel, defaultCallOptions: CallOptions)
-
   /// The gRPC channel over which RPCs are sent and received. Note that this is distinct
   /// from `NIO.Channel`.
   var channel: GRPCChannel { get }
@@ -29,7 +27,22 @@ public protocol GRPCClient {
   var defaultCallOptions: CallOptions { get set }
 }
 
+// MARK: Convenience methods
+
 extension GRPCClient {
+  public func makeUnaryCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    request: Request,
+    callOptions: CallOptions? = nil,
+    responseType: Response.Type = Response.self
+  ) -> UnaryCall<Request, Response> {
+    return self.channel.makeUnaryCall(
+      path: path,
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
   public func makeUnaryCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     request: Request,
@@ -40,6 +53,21 @@ extension GRPCClient {
       path: path,
       request: request,
       callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
+  public func makeServerStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    request: Request,
+    callOptions: CallOptions? = nil,
+    responseType: Response.Type = Response.self,
+    handler: @escaping (Response) -> Void
+  ) -> ServerStreamingCall<Request, Response> {
+    return self.channel.makeServerStreamingCall(
+      path: path,
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions,
+      handler: handler
     )
   }
 
@@ -58,6 +86,18 @@ extension GRPCClient {
     )
   }
 
+  public func makeClientStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    callOptions: CallOptions? = nil,
+    requestType: Request.Type = Request.self,
+    responseType: Response.Type = Response.self
+  ) -> ClientStreamingCall<Request, Response> {
+    return self.channel.makeClientStreamingCall(
+      path: path,
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
   public func makeClientStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     callOptions: CallOptions? = nil,
@@ -67,6 +107,20 @@ extension GRPCClient {
     return self.channel.makeClientStreamingCall(
       path: path,
       callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
+  public func makeBidirectionalStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    callOptions: CallOptions? = nil,
+    requestType: Request.Type = Request.self,
+    responseType: Response.Type = Response.self,
+    handler: @escaping (Response) -> Void
+  ) -> BidirectionalStreamingCall<Request, Response> {
+    return self.channel.makeBidirectionalStreamingCall(
+      path: path,
+      callOptions: callOptions ?? self.defaultCallOptions,
+      handler: handler
     )
   }
 

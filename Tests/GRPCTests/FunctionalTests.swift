@@ -32,7 +32,7 @@ class FunctionalTestsInsecureTransport: EchoTestCaseBase {
   }
 
   var lotsOfStrings: [String] {
-    return (0..<5_000).map {
+    return (0..<500).map {
       String(describing: $0)
     }
   }
@@ -61,7 +61,7 @@ class FunctionalTestsInsecureTransport: EchoTestCaseBase {
 
     // Sending that many requests at once can sometimes trip things up, it seems.
     let clockStart = clock()
-    let numberOfRequests = 2_000
+    let numberOfRequests = 200
 
     // Due to https://github.com/apple/swift-nio-http2/issues/87#issuecomment-483542401 we need to
     // limit the number of active streams. The default in NIOHTTP2 is 100, so we'll use it too.
@@ -90,7 +90,7 @@ class FunctionalTestsInsecureTransport: EchoTestCaseBase {
         get.status.map { $0.code }.assertEqual(.ok, fulfill: statusExpectation)
       }
 
-      if upperBound % 1_000 == 0 {
+      if upperBound % 100 == 0 {
         print("\(upperBound) requests sent so far, elapsed time: \(Double(clock() - clockStart) / Double(CLOCKS_PER_SEC))")
       }
 
@@ -114,15 +114,12 @@ class FunctionalTestsInsecureTransport: EchoTestCaseBase {
     let responseExpectation = self.makeResponseExpectation()
     let statusExpectation = self.makeStatusExpectation()
 
-    let call = client.collect(callOptions: CallOptions(timeout: .infinite))
+    let call = client.collect(callOptions: CallOptions(timeLimit: .none))
     call.status.map { $0.code }.assertEqual(.ok, fulfill: statusExpectation, file: file, line: line)
     call.response.assertEqual(Echo_EchoResponse(text: "Swift echo collect: \(messages.joined(separator: " "))"), fulfill: responseExpectation)
 
-    var queue = call.newMessageQueue()
-    for message in messages {
-      queue = queue.flatMap { call.sendMessage(Echo_EchoRequest(text: message)) }
-    }
-    queue.whenSuccess { call.sendEnd(promise: nil) }
+    call.sendMessages(messages.map { .init(text: $0) }, promise: nil)
+    call.sendEnd(promise: nil)
 
     self.wait(for: [responseExpectation, statusExpectation], timeout: self.defaultTestTimeout)
   }

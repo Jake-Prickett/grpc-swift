@@ -28,7 +28,7 @@ all:
 plugins: ${PROTOC_GEN_SWIFT} ${PROTOC_GEN_GRPC_SWIFT}
 	cp $^ .
 
-${PROTOC_GEN_SWIFT}:
+${PROTOC_GEN_SWIFT}: Package.resolved
 	${SWIFT_BUILD_RELEASE} --product protoc-gen-swift
 
 ${PROTOC_GEN_GRPC_SWIFT}: Sources/protoc-gen-grpc-swift/*.swift
@@ -73,6 +73,14 @@ generate-linuxmain:
 ECHO_PROTO=Sources/Examples/Echo/Model/echo.proto
 ECHO_PB=$(ECHO_PROTO:.proto=.pb.swift)
 ECHO_GRPC=$(ECHO_PROTO:.proto=.grpc.swift)
+
+# For Echo we'll generate the test client as well.
+${ECHO_GRPC}: ${ECHO_PROTO} ${PROTOC_GEN_GRPC_SWIFT}
+	protoc $< \
+		--proto_path=$(dir $<) \
+		--plugin=${PROTOC_GEN_GRPC_SWIFT} \
+		--grpc-swift_opt=Visibility=Public,TestClient=true \
+		--grpc-swift_out=$(dir $<)
 
 # Generates protobufs and gRPC client and server for the Echo example
 .PHONY:

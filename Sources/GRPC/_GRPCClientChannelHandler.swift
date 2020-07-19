@@ -24,7 +24,7 @@ import Logging
 ///
 /// - Important: This is **NOT** part of the public API. It is declared as
 ///   `public` because it is used within performance tests.
-public enum _GRPCClientRequestPart<Request: GRPCPayload> {
+public enum _GRPCClientRequestPart<Request> {
   /// The 'head' of the request, that is, information about the initiation of the RPC.
   case head(_GRPCRequestHead)
 
@@ -35,6 +35,29 @@ public enum _GRPCClientRequestPart<Request: GRPCPayload> {
   case end
 }
 
+/// As `_GRPCClientRequestPart` but messages are serialized.
+public typealias _RawGRPCClientRequestPart = _GRPCClientRequestPart<ByteBuffer>
+
+/// A gRPC client response message part.
+///
+/// - Important: This is **NOT** part of the public API.
+public enum _GRPCClientResponsePart<Response> {
+  /// Metadata received as the server acknowledges the RPC.
+  case initialMetadata(HPACKHeaders)
+
+  /// A deserialized response message received from the server.
+  case message(_MessageContext<Response>)
+
+  /// The metadata received at the end of the RPC.
+  case trailingMetadata(HPACKHeaders)
+
+  /// The final status of the RPC.
+  case status(GRPCStatus)
+}
+
+/// As `_GRPCClientResponsePart` but messages are serialized.
+public typealias _RawGRPCClientResponsePart = _GRPCClientResponsePart<ByteBuffer>
+
 /// - Important: This is **NOT** part of the public API. It is declared as
 ///   `public` because it is used within performance tests.
 public struct _GRPCRequestHead {
@@ -43,7 +66,7 @@ public struct _GRPCRequestHead {
     var scheme: String
     var path: String
     var host: String
-    var timeout: GRPCTimeout
+    var deadline: NIODeadline
     var encoding: ClientMessageEncoding
 
     init(
@@ -51,14 +74,14 @@ public struct _GRPCRequestHead {
       scheme: String,
       path: String,
       host: String,
-      timeout: GRPCTimeout,
+      deadline: NIODeadline,
       encoding: ClientMessageEncoding
     ) {
       self.method = method
       self.scheme = scheme
       self.path = path
       self.host = host
-      self.timeout = timeout
+      self.deadline = deadline
       self.encoding = encoding
     }
 
@@ -68,7 +91,7 @@ public struct _GRPCRequestHead {
         scheme: self.scheme,
         path: self.path,
         host: self.host,
-        timeout: self.timeout,
+        deadline: self.deadline,
         encoding: self.encoding
       )
     }
@@ -126,15 +149,15 @@ public struct _GRPCRequestHead {
     }
   }
 
-  internal var timeout: GRPCTimeout {
+  internal var deadline: NIODeadline {
     get {
-      return self._storage.timeout
+      return self._storage.deadline
     }
     set {
       if !isKnownUniquelyReferenced(&self._storage) {
         self._storage = self._storage.copy()
       }
-      self._storage.timeout = newValue
+      self._storage.deadline = newValue
     }
   }
 
@@ -155,7 +178,7 @@ public struct _GRPCRequestHead {
     scheme: String,
     path: String,
     host: String,
-    timeout: GRPCTimeout,
+    deadline: NIODeadline,
     customMetadata: HPACKHeaders,
     encoding: ClientMessageEncoding
   ) {
@@ -164,28 +187,36 @@ public struct _GRPCRequestHead {
       scheme: scheme,
       path: path,
       host: host,
-      timeout: timeout,
+      deadline: deadline,
       encoding: encoding
     )
     self.customMetadata = customMetadata
   }
 }
 
-/// A gRPC client response message part.
-///
-/// - Important: This is **NOT** part of the public API.
-public enum _GRPCClientResponsePart<Response: GRPCPayload> {
-  /// Metadata received as the server acknowledges the RPC.
-  case initialMetadata(HPACKHeaders)
+extension _GRPCRequestHead {
+  internal init(
+    scheme: String,
+    path: String,
+    host: String,
+    requestID: String,
+    options: CallOptions
+  ) {
+    var customMetadata = options.customMetadata
+    if let requestIDHeader = options.requestIDHeader {
+      customMetadata.add(name: requestIDHeader, value: requestID)
+    }
 
-  /// A deserialized response message received from the server.
-  case message(_MessageContext<Response>)
-
-  /// The metadata received at the end of the RPC.
-  case trailingMetadata(HPACKHeaders)
-
-  /// The final status of the RPC.
-  case status(GRPCStatus)
+    self = _GRPCRequestHead(
+      method: options.cacheable ? "GET" : "POST",
+      scheme: scheme,
+      path: path,
+      host: host,
+      deadline: options.timeLimit.makeDeadline(),
+      customMetadata: customMetadata,
+      encoding: options.messageEncoding
+    )
+  }
 }
 
 /// The type of gRPC call.
@@ -231,10 +262,10 @@ public enum GRPCCallType {
 ///
 /// - Important: This is **NOT** part of the public API. It is declared as
 ///   `public` because it is used within performance tests.
-public final class _GRPCClientChannelHandler<Request: GRPCPayload, Response: GRPCPayload> {
+public final class _GRPCClientChannelHandler {
   private let logger: Logger
   private let streamID: HTTP2StreamID
-  private var stateMachine: GRPCClientStateMachine<Request, Response>
+  private var stateMachine: GRPCClientStateMachine
 
   /// Creates a new gRPC channel handler for clients to translate HTTP/2 frames to gRPC messages.
   ///
@@ -262,7 +293,7 @@ public final class _GRPCClientChannelHandler<Request: GRPCPayload, Response: GRP
 // MARK: - GRPCClientChannelHandler: Inbound
 extension _GRPCClientChannelHandler: ChannelInboundHandler {
   public typealias InboundIn = HTTP2Frame
-  public typealias InboundOut = _GRPCClientResponsePart<Response>
+  public typealias InboundOut = _RawGRPCClientResponsePart
 
   public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
     let frame = self.unwrapInboundIn(data)
@@ -371,7 +402,7 @@ extension _GRPCClientChannelHandler: ChannelInboundHandler {
     let result = self.stateMachine.receiveResponseBuffer(&buffer).mapError { error -> GRPCError.WithContext in
       switch error {
       case .cardinalityViolation:
-        return GRPCError.StreamCardinalityViolation(stream: .response).captureContext()
+        return GRPCError.StreamCardinalityViolation.response.captureContext()
       case .deserializationFailed, .leftOverBytes:
         return GRPCError.DeserializationFailure().captureContext()
       case .decompressionLimitExceeded(let compressedSize):
@@ -401,7 +432,7 @@ extension _GRPCClientChannelHandler: ChannelInboundHandler {
 
 // MARK: - GRPCClientChannelHandler: Outbound
 extension _GRPCClientChannelHandler: ChannelOutboundHandler {
-  public typealias OutboundIn = _GRPCClientRequestPart<Request>
+  public typealias OutboundIn = _RawGRPCClientRequestPart
   public typealias OutboundOut = HTTP2Frame
 
   public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
@@ -477,22 +508,6 @@ extension _GRPCClientChannelHandler: ChannelOutboundHandler {
           context.fireErrorCaught(GRPCError.InvalidState("unable to close request stream").captureContext())
         }
       }
-    }
-  }
-
-  public func triggerUserOutboundEvent(
-    context: ChannelHandlerContext,
-    event: Any,
-    promise: EventLoopPromise<Void>?
-  ) {
-    if let userEvent = event as? GRPCClientUserEvent {
-      switch userEvent {
-      case .cancelled:
-        context.fireErrorCaught(GRPCError.RPCCancelledByClient().captureContext())
-        context.close(mode: .all, promise: promise)
-      }
-    } else {
-      context.triggerUserOutboundEvent(event, promise: promise)
     }
   }
 }

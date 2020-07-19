@@ -28,14 +28,107 @@ import SwiftProtobuf
 
 
 /// Usage: instantiate Echo_EchoClient, then call methods of this protocol to make API calls.
-public protocol Echo_EchoClientProtocol {
-  func get(_ request: Echo_EchoRequest, callOptions: CallOptions?) -> UnaryCall<Echo_EchoRequest, Echo_EchoResponse>
-  func expand(_ request: Echo_EchoRequest, callOptions: CallOptions?, handler: @escaping (Echo_EchoResponse) -> Void) -> ServerStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
-  func collect(callOptions: CallOptions?) -> ClientStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
-  func update(callOptions: CallOptions?, handler: @escaping (Echo_EchoResponse) -> Void) -> BidirectionalStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
+public protocol Echo_EchoClientProtocol: GRPCClient {
+  func get(
+    _ request: Echo_EchoRequest,
+    callOptions: CallOptions?
+  ) -> UnaryCall<Echo_EchoRequest, Echo_EchoResponse>
+
+  func expand(
+    _ request: Echo_EchoRequest,
+    callOptions: CallOptions?,
+    handler: @escaping (Echo_EchoResponse) -> Void
+  ) -> ServerStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
+
+  func collect(
+    callOptions: CallOptions?
+  ) -> ClientStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
+
+  func update(
+    callOptions: CallOptions?,
+    handler: @escaping (Echo_EchoResponse) -> Void
+  ) -> BidirectionalStreamingCall<Echo_EchoRequest, Echo_EchoResponse>
+
 }
 
-public final class Echo_EchoClient: GRPCClient, Echo_EchoClientProtocol {
+extension Echo_EchoClientProtocol {
+
+  /// Immediately returns an echo of a request.
+  ///
+  /// - Parameters:
+  ///   - request: Request to send to Get.
+  ///   - callOptions: Call options.
+  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
+  public func get(
+    _ request: Echo_EchoRequest,
+    callOptions: CallOptions? = nil
+  ) -> UnaryCall<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.makeUnaryCall(
+      path: "/echo.Echo/Get",
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
+  /// Splits a request into words and returns each word in a stream of messages.
+  ///
+  /// - Parameters:
+  ///   - request: Request to send to Expand.
+  ///   - callOptions: Call options.
+  ///   - handler: A closure called when each response is received from the server.
+  /// - Returns: A `ServerStreamingCall` with futures for the metadata and status.
+  public func expand(
+    _ request: Echo_EchoRequest,
+    callOptions: CallOptions? = nil,
+    handler: @escaping (Echo_EchoResponse) -> Void
+  ) -> ServerStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.makeServerStreamingCall(
+      path: "/echo.Echo/Expand",
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions,
+      handler: handler
+    )
+  }
+
+  /// Collects a stream of messages and returns them concatenated when the caller closes.
+  ///
+  /// Callers should use the `send` method on the returned object to send messages
+  /// to the server. The caller should send an `.end` after the final message has been sent.
+  ///
+  /// - Parameters:
+  ///   - callOptions: Call options.
+  /// - Returns: A `ClientStreamingCall` with futures for the metadata, status and response.
+  public func collect(
+    callOptions: CallOptions? = nil
+  ) -> ClientStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.makeClientStreamingCall(
+      path: "/echo.Echo/Collect",
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+
+  /// Streams back messages as they are received in an input stream.
+  ///
+  /// Callers should use the `send` method on the returned object to send messages
+  /// to the server. The caller should send an `.end` after the final message has been sent.
+  ///
+  /// - Parameters:
+  ///   - callOptions: Call options.
+  ///   - handler: A closure called when each response is received from the server.
+  /// - Returns: A `ClientStreamingCall` with futures for the metadata and status.
+  public func update(
+    callOptions: CallOptions? = nil,
+    handler: @escaping (Echo_EchoResponse) -> Void
+  ) -> BidirectionalStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.makeBidirectionalStreamingCall(
+      path: "/echo.Echo/Update",
+      callOptions: callOptions ?? self.defaultCallOptions,
+      handler: handler
+    )
+  }
+}
+
+public final class Echo_EchoClient: Echo_EchoClientProtocol {
   public let channel: GRPCChannel
   public var defaultCallOptions: CallOptions
 
@@ -48,61 +141,121 @@ public final class Echo_EchoClient: GRPCClient, Echo_EchoClientProtocol {
     self.channel = channel
     self.defaultCallOptions = defaultCallOptions
   }
+}
 
-  /// Immediately returns an echo of a request.
-  ///
-  /// - Parameters:
-  ///   - request: Request to send to Get.
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
-  public func get(_ request: Echo_EchoRequest, callOptions: CallOptions? = nil) -> UnaryCall<Echo_EchoRequest, Echo_EchoResponse> {
-    return self.makeUnaryCall(path: "/echo.Echo/Get",
-                              request: request,
-                              callOptions: callOptions ?? self.defaultCallOptions)
+public final class Echo_EchoTestClient: Echo_EchoClientProtocol {
+  private let fakeChannel: FakeChannel
+  public var defaultCallOptions: CallOptions
+
+  public var channel: GRPCChannel {
+    return self.fakeChannel
   }
 
-  /// Splits a request into words and returns each word in a stream of messages.
-  ///
-  /// - Parameters:
-  ///   - request: Request to send to Expand.
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  ///   - handler: A closure called when each response is received from the server.
-  /// - Returns: A `ServerStreamingCall` with futures for the metadata and status.
-  public func expand(_ request: Echo_EchoRequest, callOptions: CallOptions? = nil, handler: @escaping (Echo_EchoResponse) -> Void) -> ServerStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
-    return self.makeServerStreamingCall(path: "/echo.Echo/Expand",
-                                        request: request,
-                                        callOptions: callOptions ?? self.defaultCallOptions,
-                                        handler: handler)
+  public init(
+    fakeChannel: FakeChannel = FakeChannel(),
+    defaultCallOptions callOptions: CallOptions = CallOptions()
+  ) {
+    self.fakeChannel = fakeChannel
+    self.defaultCallOptions = callOptions
   }
 
-  /// Collects a stream of messages and returns them concatenated when the caller closes.
+  /// Make a unary response for the Get RPC. This must be called
+  /// before calling 'get'. See also 'FakeUnaryResponse'.
   ///
-  /// Callers should use the `send` method on the returned object to send messages
-  /// to the server. The caller should send an `.end` after the final message has been sent.
-  ///
-  /// - Parameters:
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  /// - Returns: A `ClientStreamingCall` with futures for the metadata, status and response.
-  public func collect(callOptions: CallOptions? = nil) -> ClientStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
-    return self.makeClientStreamingCall(path: "/echo.Echo/Collect",
-                                        callOptions: callOptions ?? self.defaultCallOptions)
+  /// - Parameter requestHandler: a handler for request parts sent by the RPC.
+  public func makeGetResponseStream(
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  ) -> FakeUnaryResponse<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.fakeChannel.makeFakeUnaryResponse(path: "/echo.Echo/Get", requestHandler: requestHandler)
   }
 
-  /// Streams back messages as they are received in an input stream.
-  ///
-  /// Callers should use the `send` method on the returned object to send messages
-  /// to the server. The caller should send an `.end` after the final message has been sent.
-  ///
-  /// - Parameters:
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  ///   - handler: A closure called when each response is received from the server.
-  /// - Returns: A `ClientStreamingCall` with futures for the metadata and status.
-  public func update(callOptions: CallOptions? = nil, handler: @escaping (Echo_EchoResponse) -> Void) -> BidirectionalStreamingCall<Echo_EchoRequest, Echo_EchoResponse> {
-    return self.makeBidirectionalStreamingCall(path: "/echo.Echo/Update",
-                                               callOptions: callOptions ?? self.defaultCallOptions,
-                                               handler: handler)
+  public func enqueueGetResponse(
+    _ response: Echo_EchoResponse,
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  )  {
+    let stream = self.makeGetResponseStream(requestHandler)
+    // This is the only operation on the stream; try! is fine.
+    try! stream.sendMessage(response)
   }
 
+  /// Returns true if there are response streams enqueued for 'Get'
+  public var hasGetResponsesRemaining: Bool {
+    return self.fakeChannel.hasFakeResponseEnqueued(forPath: "/echo.Echo/Get")
+  }
+
+  /// Make a streaming response for the Expand RPC. This must be called
+  /// before calling 'expand'. See also 'FakeStreamingResponse'.
+  ///
+  /// - Parameter requestHandler: a handler for request parts sent by the RPC.
+  public func makeExpandResponseStream(
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  ) -> FakeStreamingResponse<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.fakeChannel.makeFakeStreamingResponse(path: "/echo.Echo/Expand", requestHandler: requestHandler)
+  }
+
+  public func enqueueExpandResponses(
+    _ responses: [Echo_EchoResponse],
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  )  {
+    let stream = self.makeExpandResponseStream(requestHandler)
+    // These are the only operation on the stream; try! is fine.
+    responses.forEach { try! stream.sendMessage($0) }
+    try! stream.sendEnd()
+  }
+
+  /// Returns true if there are response streams enqueued for 'Expand'
+  public var hasExpandResponsesRemaining: Bool {
+    return self.fakeChannel.hasFakeResponseEnqueued(forPath: "/echo.Echo/Expand")
+  }
+
+  /// Make a unary response for the Collect RPC. This must be called
+  /// before calling 'collect'. See also 'FakeUnaryResponse'.
+  ///
+  /// - Parameter requestHandler: a handler for request parts sent by the RPC.
+  public func makeCollectResponseStream(
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  ) -> FakeUnaryResponse<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.fakeChannel.makeFakeUnaryResponse(path: "/echo.Echo/Collect", requestHandler: requestHandler)
+  }
+
+  public func enqueueCollectResponse(
+    _ response: Echo_EchoResponse,
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  )  {
+    let stream = self.makeCollectResponseStream(requestHandler)
+    // This is the only operation on the stream; try! is fine.
+    try! stream.sendMessage(response)
+  }
+
+  /// Returns true if there are response streams enqueued for 'Collect'
+  public var hasCollectResponsesRemaining: Bool {
+    return self.fakeChannel.hasFakeResponseEnqueued(forPath: "/echo.Echo/Collect")
+  }
+
+  /// Make a streaming response for the Update RPC. This must be called
+  /// before calling 'update'. See also 'FakeStreamingResponse'.
+  ///
+  /// - Parameter requestHandler: a handler for request parts sent by the RPC.
+  public func makeUpdateResponseStream(
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  ) -> FakeStreamingResponse<Echo_EchoRequest, Echo_EchoResponse> {
+    return self.fakeChannel.makeFakeStreamingResponse(path: "/echo.Echo/Update", requestHandler: requestHandler)
+  }
+
+  public func enqueueUpdateResponses(
+    _ responses: [Echo_EchoResponse],
+    _ requestHandler: @escaping (FakeRequestPart<Echo_EchoRequest>) -> () = { _ in }
+  )  {
+    let stream = self.makeUpdateResponseStream(requestHandler)
+    // These are the only operation on the stream; try! is fine.
+    responses.forEach { try! stream.sendMessage($0) }
+    try! stream.sendEnd()
+  }
+
+  /// Returns true if there are response streams enqueued for 'Update'
+  public var hasUpdateResponsesRemaining: Bool {
+    return self.fakeChannel.hasFakeResponseEnqueued(forPath: "/echo.Echo/Update")
+  }
 }
 
 /// To build a server, implement a class that conforms to this protocol.
@@ -125,26 +278,26 @@ extension Echo_EchoProvider {
   public func handleMethod(_ methodName: String, callHandlerContext: CallHandlerContext) -> GRPCCallHandler? {
     switch methodName {
     case "Get":
-      return UnaryCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeUnary(callHandlerContext: callHandlerContext) { context in
         return { request in
           self.get(request: request, context: context)
         }
       }
 
     case "Expand":
-      return ServerStreamingCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeServerStreaming(callHandlerContext: callHandlerContext) { context in
         return { request in
           self.expand(request: request, context: context)
         }
       }
 
     case "Collect":
-      return ClientStreamingCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeClientStreaming(callHandlerContext: callHandlerContext) { context in
         return self.collect(context: context)
       }
 
     case "Update":
-      return BidirectionalStreamingCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeBidirectionalStreaming(callHandlerContext: callHandlerContext) { context in
         return self.update(context: context)
       }
 
@@ -153,7 +306,3 @@ extension Echo_EchoProvider {
   }
 }
 
-
-// Provides conformance to `GRPCPayload`
-extension Echo_EchoRequest: GRPCProtobufPayload {}
-extension Echo_EchoResponse: GRPCProtobufPayload {}

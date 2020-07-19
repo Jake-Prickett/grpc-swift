@@ -15,76 +15,193 @@
  */
 import NIO
 import NIOHTTP2
+import NIOHPACK
 import Logging
 
 /// A client-streaming gRPC call.
 ///
-/// Messages should be sent via the `send` method; an `.end` message should be sent
-/// to indicate the final message has been sent.
-///
-/// The following futures are available to the caller:
-/// - `initialMetadata`: the initial metadata returned from the server,
-/// - `response`: the response from the call,
-/// - `status`: the status of the gRPC call after it has ended,
-/// - `trailingMetadata`: any metadata returned from the server alongside the `status`.
-public final class ClientStreamingCall<RequestPayload: GRPCPayload, ResponsePayload: GRPCPayload>
-  : BaseClientCall<RequestPayload, ResponsePayload>,
-    StreamingRequestClientCall,
-    UnaryResponseClientCall {
-  public let response: EventLoopFuture<ResponsePayload>
-  private var messageQueue: EventLoopFuture<Void>
+/// Messages should be sent via the `sendMessage` and `sendMessages` methods; the stream of messages
+/// must be terminated by calling `sendEnd` to indicate the final message has been sent.
+public final class ClientStreamingCall<RequestPayload, ResponsePayload>: StreamingRequestClientCall, UnaryResponseClientCall {
+  private let transport: ChannelTransport<RequestPayload, ResponsePayload>
 
-  init(
-    path: String,
-    scheme: String,
-    authority: String,
-    callOptions: CallOptions,
-    eventLoop: EventLoop,
+  /// The options used to make the RPC.
+  public let options: CallOptions
+
+  /// The `Channel` used to transport messages for this RPC.
+  public var subchannel: EventLoopFuture<Channel> {
+    return self.transport.streamChannel()
+  }
+
+  /// The `EventLoop` this call is running on.
+  public var eventLoop: EventLoop {
+    return self.transport.eventLoop
+  }
+
+  /// Cancel this RPC if it hasn't already completed.
+  public func cancel(promise: EventLoopPromise<Void>?) {
+    self.transport.cancel(promise: promise)
+  }
+
+  // MARK: - Response Parts
+
+  /// The initial metadata returned from the server.
+  public var initialMetadata: EventLoopFuture<HPACKHeaders> {
+    if self.eventLoop.inEventLoop {
+      return self.transport.responseContainer.lazyInitialMetadataPromise.getFutureResult()
+    } else {
+      return self.eventLoop.flatSubmit {
+        return self.transport.responseContainer.lazyInitialMetadataPromise.getFutureResult()
+      }
+    }
+  }
+
+  /// The response returned by the server.
+  public let response: EventLoopFuture<ResponsePayload>
+
+  /// The trailing metadata returned from the server.
+  public var trailingMetadata: EventLoopFuture<HPACKHeaders> {
+    if self.eventLoop.inEventLoop {
+      return self.transport.responseContainer.lazyTrailingMetadataPromise.getFutureResult()
+    } else {
+      return self.eventLoop.flatSubmit {
+        return self.transport.responseContainer.lazyTrailingMetadataPromise.getFutureResult()
+      }
+    }
+  }
+
+  /// The final status of the the RPC.
+  public var status: EventLoopFuture<GRPCStatus> {
+    if self.eventLoop.inEventLoop {
+      return self.transport.responseContainer.lazyStatusPromise.getFutureResult()
+    } else {
+      return self.eventLoop.flatSubmit {
+        return self.transport.responseContainer.lazyStatusPromise.getFutureResult()
+      }
+    }
+  }
+  
+  // MARK: - Request
+
+  /// Sends a message to the service.
+  ///
+  /// - Important: Callers must terminate the stream of messages by calling `sendEnd()` or
+  ///   `sendEnd(promise:)`.
+  ///
+  /// - Parameters:
+  ///   - message: The message to send.
+  ///   - compression: Whether compression should be used for this message. Ignored if compression
+  ///     was not enabled for the RPC.
+  ///   - promise: A promise to fulfill with the outcome of the send operation.
+  public func sendMessage(
+    _ message: RequestPayload,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) {
+    let compressed = compression.isEnabled(callDefault: self.options.messageEncoding.enabledForRequests)
+    let messageContext = _MessageContext(message, compressed: compressed)
+    self.transport.sendRequest(.message(messageContext), promise: promise)
+  }
+
+  /// Sends a sequence of messages to the service.
+  ///
+  /// - Important: Callers must terminate the stream of messages by calling `sendEnd()` or
+  ///   `sendEnd(promise:)`.
+  ///
+  /// - Parameters:
+  ///   - messages: The sequence of messages to send.
+  ///   - compression: Whether compression should be used for this message. Ignored if compression
+  ///     was not enabled for the RPC.
+  ///   - promise: A promise to fulfill with the outcome of the send operation. It will only succeed
+  ///     if all messages were written successfully.
+  public func sendMessages<S>(
+    _ messages: S,
+    compression: Compression = .deferToCallDefault,
+    promise: EventLoopPromise<Void>?
+  ) where S: Sequence, S.Element == RequestPayload {
+    let compressed = compression.isEnabled(callDefault: self.options.messageEncoding.enabledForRequests)
+    self.transport.sendRequests(messages.map {
+      .message(_MessageContext($0, compressed: compressed))
+    }, promise: promise)
+  }
+
+  /// Terminates a stream of messages sent to the service.
+  ///
+  /// - Important: This should only ever be called once.
+  /// - Parameter promise: A promise to be fulfilled when the end has been sent.
+  public func sendEnd(promise: EventLoopPromise<Void>?) {
+    self.transport.sendRequest(.end, promise: promise)
+  }
+
+  internal init(
+    response: EventLoopFuture<ResponsePayload>,
+    transport: ChannelTransport<RequestPayload, ResponsePayload>,
+    options: CallOptions
+  ) {
+    self.response = response
+    self.transport = transport
+    self.options = options
+  }
+
+  internal func sendHead(_ head: _GRPCRequestHead) {
+    self.transport.sendRequest(.head(head), promise: nil)
+  }
+}
+
+extension ClientStreamingCall {
+  internal static func makeOnHTTP2Stream<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
     multiplexer: EventLoopFuture<HTTP2StreamMultiplexer>,
+    serializer: Serializer,
+    deserializer: Deserializer,
+    callOptions: CallOptions,
     errorDelegate: ClientErrorDelegate?,
     logger: Logger
-  ) {
-    let requestID = callOptions.requestIDProvider.requestID()
-    var logger = logger
-    logger[metadataKey: MetadataKey.requestID] = "\(requestID)"
-    logger.debug("starting rpc", metadata: ["path": "\(path)"])
-
-    self.messageQueue = eventLoop.makeSucceededFuture(())
-    let responsePromise = eventLoop.makePromise(of: ResponsePayload.self)
-    self.response = responsePromise.futureResult
-
-    let responseHandler = GRPCClientUnaryResponseChannelHandler(
-      initialMetadataPromise: eventLoop.makePromise(),
-      trailingMetadataPromise: eventLoop.makePromise(),
-      responsePromise: responsePromise,
-      statusPromise: eventLoop.makePromise(),
-      errorDelegate: errorDelegate,
-      timeout: callOptions.timeout,
-      logger: logger
-    )
-
-    let requestHead = _GRPCRequestHead(
-      scheme: scheme,
-      path: path,
-      host: authority,
-      requestID: requestID,
-      options: callOptions
-    )
-
-    let requestHandler = _StreamingRequestChannelHandler<RequestPayload>(requestHead: requestHead)
-
-    super.init(
-      eventLoop: eventLoop,
+  ) -> ClientStreamingCall<RequestPayload, ResponsePayload> where Serializer.Input == RequestPayload, Deserializer.Output == ResponsePayload {
+    let eventLoop = multiplexer.eventLoop
+    let responsePromise: EventLoopPromise<ResponsePayload> = eventLoop.makePromise()
+    let transport = ChannelTransport<RequestPayload, ResponsePayload>(
       multiplexer: multiplexer,
+      serializer: serializer,
+      deserializer: deserializer,
+      responseContainer: .init(eventLoop: eventLoop, unaryResponsePromise: responsePromise),
       callType: .clientStreaming,
-      callOptions: callOptions,
-      responseHandler: responseHandler,
-      requestHandler: requestHandler,
+      timeLimit: callOptions.timeLimit,
+      errorDelegate: errorDelegate,
       logger: logger
     )
+    return ClientStreamingCall(response: responsePromise.futureResult, transport: transport, options: callOptions)
   }
 
-  public func newMessageQueue() -> EventLoopFuture<Void> {
-    return self.messageQueue
+  internal static func make<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
+    serializer: Serializer,
+    deserializer: Deserializer,
+    fakeResponse: FakeUnaryResponse<RequestPayload, ResponsePayload>?,
+    callOptions: CallOptions,
+    logger: Logger
+  ) -> ClientStreamingCall<RequestPayload, ResponsePayload> where Serializer.Input == RequestPayload, Deserializer.Output == ResponsePayload {
+    let eventLoop = fakeResponse?.channel.eventLoop ?? EmbeddedEventLoop()
+    let responsePromise: EventLoopPromise<ResponsePayload> = eventLoop.makePromise()
+    let responseContainer = ResponsePartContainer(eventLoop: eventLoop, unaryResponsePromise: responsePromise)
+
+    let transport: ChannelTransport<RequestPayload, ResponsePayload>
+    if let fakeResponse = fakeResponse {
+      transport = .init(
+        fakeResponse: fakeResponse,
+        responseContainer: responseContainer,
+        timeLimit: callOptions.timeLimit,
+        logger: logger
+      )
+
+      fakeResponse.activate()
+    } else {
+      transport = .makeTransportForMissingFakeResponse(
+        eventLoop: eventLoop,
+        responseContainer: responseContainer,
+        logger: logger
+      )
+    }
+
+    return ClientStreamingCall(response: responsePromise.futureResult, transport: transport, options: callOptions)
   }
+
 }

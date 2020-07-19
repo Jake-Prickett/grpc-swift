@@ -117,13 +117,22 @@ To install these plugins, just copy the two executables (`protoc-gen-swift` and
 that is part of your `PATH` environment variable. Alternatively the full path to
 the plugins can be specified when using `protoc`.
 
+Alternatively, you can get the latest precompiled version of the plugins by adding
+the following line to your `Podfile`:
+
+```ruby
+    pod 'gRPC-Swift-Plugins'
+```
+
+The plugins are available in the `Pods/gRPC-Swift-Plugins/` folder afterwards.
+
 ## Examples
 
 gRPC Swift has a number of tutorials and examples available. They are split
-across two directorys:
+across two directories:
 
 - [`/Sources/Examples`][examples-in-source] contains examples which do not
-  require additional depenedencies and may be built using the Swift Package
+  require additional dependencies and may be built using the Swift Package
   Manager.
 - [`/Examples`][examples-out-of-source] contains examples which rely on
   external dependencies or may not be built by the Swift Package Manager (such
@@ -138,10 +147,11 @@ Some of the examples are accompanied by tutorials, including:
 
 ## Documentation
 
-The `docs` directory contains documenation, including:
+The `docs` directory contains documentation, including:
 
 - Options for the `protoc` plugin in [`docs/plugin.md`][docs-plugin]
 - How to configure TLS in [`docs/tls.md`][docs-tls]
+- How to configure keepalive in [`docs/keepalive.md`][docs-keepalive]
 - Support for Apple Platforms and NIO Transport Services in
   [`docs/apple-platforms.md`][docs-apple]
 
@@ -158,6 +168,7 @@ Please get involved! See our [guidelines for contributing](CONTRIBUTING.md).
 [docs-plugin]: ./docs/plugin.md
 [docs-quickstart]: ./docs/quick-start.md
 [docs-tls]: ./docs/tls.md
+[docs-keepalive]: ./docs/keepalive.md
 [docs-tutorial]: ./docs/basic-tutorial.md
 [grpc]: https://github.com/grpc/grpc
 [protobuf-releases]: https://github.com/protocolbuffers/protobuf/releases

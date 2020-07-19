@@ -28,11 +28,35 @@ import SwiftProtobuf
 
 
 /// Usage: instantiate B_ServiceBClient, then call methods of this protocol to make API calls.
-internal protocol B_ServiceBClientProtocol {
-  func callServiceB(_ request: B_MessageB, callOptions: CallOptions?) -> UnaryCall<B_MessageB, SwiftProtobuf.Google_Protobuf_Empty>
+internal protocol B_ServiceBClientProtocol: GRPCClient {
+  func callServiceB(
+    _ request: B_MessageB,
+    callOptions: CallOptions?
+  ) -> UnaryCall<B_MessageB, SwiftProtobuf.Google_Protobuf_Empty>
+
 }
 
-internal final class B_ServiceBClient: GRPCClient, B_ServiceBClientProtocol {
+extension B_ServiceBClientProtocol {
+
+  /// Unary call to CallServiceB
+  ///
+  /// - Parameters:
+  ///   - request: Request to send to CallServiceB.
+  ///   - callOptions: Call options.
+  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
+  internal func callServiceB(
+    _ request: B_MessageB,
+    callOptions: CallOptions? = nil
+  ) -> UnaryCall<B_MessageB, SwiftProtobuf.Google_Protobuf_Empty> {
+    return self.makeUnaryCall(
+      path: "/b.ServiceB/CallServiceB",
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+}
+
+internal final class B_ServiceBClient: B_ServiceBClientProtocol {
   internal let channel: GRPCChannel
   internal var defaultCallOptions: CallOptions
 
@@ -45,19 +69,6 @@ internal final class B_ServiceBClient: GRPCClient, B_ServiceBClientProtocol {
     self.channel = channel
     self.defaultCallOptions = defaultCallOptions
   }
-
-  /// Unary call to CallServiceB
-  ///
-  /// - Parameters:
-  ///   - request: Request to send to CallServiceB.
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
-  internal func callServiceB(_ request: B_MessageB, callOptions: CallOptions? = nil) -> UnaryCall<B_MessageB, SwiftProtobuf.Google_Protobuf_Empty> {
-    return self.makeUnaryCall(path: "/b.ServiceB/CallServiceB",
-                              request: request,
-                              callOptions: callOptions ?? self.defaultCallOptions)
-  }
-
 }
 
 /// To build a server, implement a class that conforms to this protocol.
@@ -73,7 +84,7 @@ extension B_ServiceBProvider {
   internal func handleMethod(_ methodName: String, callHandlerContext: CallHandlerContext) -> GRPCCallHandler? {
     switch methodName {
     case "CallServiceB":
-      return UnaryCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeUnary(callHandlerContext: callHandlerContext) { context in
         return { request in
           self.callServiceB(request: request, context: context)
         }
@@ -84,6 +95,3 @@ extension B_ServiceBProvider {
   }
 }
 
-
-// Provides conformance to `GRPCPayload`
-extension B_MessageB: GRPCProtobufPayload {}

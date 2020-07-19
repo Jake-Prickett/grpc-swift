@@ -19,6 +19,7 @@ import NIOHTTP2
 import NIOSSL
 import NIOTLS
 import Logging
+import SwiftProtobuf
 
 /// Provides a single, managed connection to a server.
 ///
@@ -72,9 +73,19 @@ import Logging
 public class ClientConnection {
   private let connectionManager: ConnectionManager
 
+  private func getChannel() -> EventLoopFuture<Channel> {
+    switch self.configuration.callStartBehavior.wrapped {
+    case .waitsForConnectivity:
+      return self.connectionManager.getChannel()
+
+    case .fastFailure:
+      return self.connectionManager.getOptimisticChannel()
+    }
+  }
+
   /// HTTP multiplexer from the `channel` handling gRPC calls.
   internal var multiplexer: EventLoopFuture<HTTP2StreamMultiplexer> {
-    return self.connectionManager.getChannel().flatMap {
+    return self.getChannel().flatMap {
       $0.pipeline.handler(type: HTTP2StreamMultiplexer.self)
     }
   }
@@ -115,78 +126,257 @@ public class ClientConnection {
   public func close() -> EventLoopFuture<Void> {
     return self.connectionManager.shutdown()
   }
+
+  private func loggerWithRequestID(_ requestID: String) -> Logger {
+    var logger = self.connectionManager.logger
+    logger[metadataKey: MetadataKey.requestID] = "\(requestID)"
+    return logger
+  }
+
+  private func makeRequestHead(path: String, options: CallOptions, requestID: String) -> _GRPCRequestHead {
+    return _GRPCRequestHead(
+      scheme: self.scheme,
+      path: path,
+      host: self.authority,
+      requestID: requestID,
+      options: options
+    )
+  }
 }
 
-// Note: documentation is inherited.
+// MARK: - Unary
+
 extension ClientConnection: GRPCChannel {
+  private func makeUnaryCall<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
+    serializer: Serializer,
+    deserializer: Deserializer,
+    path: String,
+    request: Serializer.Input,
+    callOptions: CallOptions
+  ) -> UnaryCall<Serializer.Input, Deserializer.Output> {
+    let requestID = callOptions.requestIDProvider.requestID()
+    let logger = self.loggerWithRequestID(requestID)
+    logger.debug("starting rpc", metadata: ["path": "\(path)"])
+
+    let call = UnaryCall<Serializer.Input, Deserializer.Output>.makeOnHTTP2Stream(
+      multiplexer: self.multiplexer,
+      serializer: serializer,
+      deserializer: deserializer,
+      callOptions: callOptions,
+      errorDelegate: self.configuration.errorDelegate,
+      logger: logger
+    )
+
+    call.send(self.makeRequestHead(path: path, options: callOptions, requestID: requestID), request: request)
+
+    return call
+  }
+
+  /// A unary call using `SwiftProtobuf.Message` messages.
+  public func makeUnaryCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    request: Request,
+    callOptions: CallOptions
+  ) -> UnaryCall<Request, Response> {
+    return self.makeUnaryCall(
+      serializer: ProtobufSerializer(),
+      deserializer: ProtobufDeserializer(),
+      path: path,
+      request: request,
+      callOptions: callOptions
+    )
+  }
+
+  /// A unary call using `GRPCPayload` messages.
   public func makeUnaryCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     request: Request,
     callOptions: CallOptions
-  ) -> UnaryCall<Request, Response> where Request : GRPCPayload, Response : GRPCPayload {
-    return UnaryCall(
+  ) -> UnaryCall<Request, Response> {
+    return self.makeUnaryCall(
+      serializer: GRPCPayloadSerializer(),
+      deserializer: GRPCPayloadDeserializer(),
       path: path,
-      scheme: self.scheme,
-      authority: self.authority,
-      callOptions: callOptions,
-      eventLoop: self.eventLoop,
+      request: request,
+      callOptions: callOptions
+    )
+  }
+}
+
+// MARK: - Client Streaming
+
+extension ClientConnection {
+  private func makeClientStreamingCall<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
+    serializer: Serializer,
+    deserializer: Deserializer,
+    path: String,
+    callOptions: CallOptions
+  ) -> ClientStreamingCall<Serializer.Input, Deserializer.Output> {
+    let requestID = callOptions.requestIDProvider.requestID()
+    let logger = self.loggerWithRequestID(requestID)
+    logger.debug("starting rpc", metadata: ["path": "\(path)"])
+
+    let call = ClientStreamingCall<Serializer.Input, Deserializer.Output>.makeOnHTTP2Stream(
       multiplexer: self.multiplexer,
+      serializer: serializer,
+      deserializer: deserializer,
+      callOptions: callOptions,
       errorDelegate: self.configuration.errorDelegate,
-      logger: self.connectionManager.logger,
-      request: request
+      logger: logger
+    )
+
+    call.sendHead(self.makeRequestHead(path: path, options: callOptions, requestID: requestID))
+
+    return call
+  }
+
+  /// A client streaming call using `SwiftProtobuf.Message` messages.
+  public func makeClientStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    callOptions: CallOptions
+  ) -> ClientStreamingCall<Request, Response> {
+    return self.makeClientStreamingCall(
+      serializer: ProtobufSerializer(),
+      deserializer: ProtobufDeserializer(),
+      path: path,
+      callOptions: callOptions
     )
   }
 
+  /// A client streaming call using `GRPCPayload` messages.
   public func makeClientStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     callOptions: CallOptions
   ) -> ClientStreamingCall<Request, Response> {
-    return ClientStreamingCall(
+    return self.makeClientStreamingCall(
+      serializer: GRPCPayloadSerializer(),
+      deserializer: GRPCPayloadDeserializer(),
       path: path,
-      scheme: self.scheme,
-      authority: self.authority,
+      callOptions: callOptions
+    )
+  }
+}
+
+// MARK: - Server Streaming
+
+extension ClientConnection {
+  private func makeServerStreamingCall<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
+    serializer: Serializer,
+    deserializer: Deserializer,
+    path: String,
+    request: Serializer.Input,
+    callOptions: CallOptions,
+    handler: @escaping (Deserializer.Output) -> Void
+  ) -> ServerStreamingCall<Serializer.Input, Deserializer.Output> {
+    let requestID = callOptions.requestIDProvider.requestID()
+    let logger = self.loggerWithRequestID(requestID)
+    logger.debug("starting rpc", metadata: ["path": "\(path)"])
+
+    let call = ServerStreamingCall<Serializer.Input, Deserializer.Output>.makeOnHTTP2Stream(
+      multiplexer: multiplexer,
+      serializer: serializer,
+      deserializer: deserializer,
       callOptions: callOptions,
-      eventLoop: self.eventLoop,
-      multiplexer: self.multiplexer,
       errorDelegate: self.configuration.errorDelegate,
-      logger: self.connectionManager.logger
+      logger: logger,
+      responseHandler: handler
+    )
+
+    call.send(self.makeRequestHead(path: path, options: callOptions, requestID: requestID), request: request)
+
+    return call
+  }
+
+  /// A server streaming call using `SwiftProtobuf.Message` messages.
+  public func makeServerStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    request: Request,
+    callOptions: CallOptions,
+    handler: @escaping (Response) -> Void
+  ) -> ServerStreamingCall<Request, Response> {
+    return self.makeServerStreamingCall(
+      serializer: ProtobufSerializer(),
+      deserializer: ProtobufDeserializer(),
+      path: path,
+      request: request,
+      callOptions: callOptions,
+      handler: handler
     )
   }
 
+  /// A server streaming call using `GRPCPayload` messages.
   public func makeServerStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     request: Request,
     callOptions: CallOptions,
     handler: @escaping (Response) -> Void
   ) -> ServerStreamingCall<Request, Response> {
-    return ServerStreamingCall(
+    return self.makeServerStreamingCall(
+      serializer: GRPCPayloadSerializer(),
+      deserializer: GRPCPayloadDeserializer(),
       path: path,
-      scheme: self.scheme,
-      authority: self.authority,
-      callOptions: callOptions,
-      eventLoop: self.eventLoop,
-      multiplexer: self.multiplexer,
-      errorDelegate: self.configuration.errorDelegate,
-      logger: self.connectionManager.logger,
       request: request,
+      callOptions: callOptions,
+      handler: handler
+    )
+  }
+}
+
+// MARK: - Bidirectional Streaming
+
+extension ClientConnection {
+  private func makeBidirectionalStreamingCall<Serializer: MessageSerializer, Deserializer: MessageDeserializer>(
+    serializer: Serializer,
+    deserializer: Deserializer,
+    path: String,
+    callOptions: CallOptions,
+    handler: @escaping (Deserializer.Output) -> Void
+  ) -> BidirectionalStreamingCall<Serializer.Input, Deserializer.Output> {
+    let requestID = callOptions.requestIDProvider.requestID()
+    let logger = self.loggerWithRequestID(requestID)
+    logger.debug("starting rpc", metadata: ["path": "\(path)"])
+
+    let call = BidirectionalStreamingCall<Serializer.Input, Deserializer.Output>.makeOnHTTP2Stream(
+      multiplexer: multiplexer,
+      serializer: serializer,
+      deserializer: deserializer,
+      callOptions: callOptions,
+      errorDelegate: self.configuration.errorDelegate,
+      logger: logger,
+      responseHandler: handler
+    )
+
+    call.sendHead(self.makeRequestHead(path: path, options: callOptions, requestID: requestID))
+
+    return call
+  }
+
+  /// A bidirectional streaming call using `SwiftProtobuf.Message` messages.
+  public func makeBidirectionalStreamingCall<Request: SwiftProtobuf.Message, Response: SwiftProtobuf.Message>(
+    path: String,
+    callOptions: CallOptions,
+    handler: @escaping (Response) -> Void
+  ) -> BidirectionalStreamingCall<Request, Response> {
+    return self.makeBidirectionalStreamingCall(
+      serializer: ProtobufSerializer(),
+      deserializer: ProtobufDeserializer(),
+      path: path,
+      callOptions: callOptions,
       handler: handler
     )
   }
 
+  /// A bidirectional streaming call using `GRPCPayload` messages.
   public func makeBidirectionalStreamingCall<Request: GRPCPayload, Response: GRPCPayload>(
     path: String,
     callOptions: CallOptions,
     handler: @escaping (Response) -> Void
   ) -> BidirectionalStreamingCall<Request, Response> {
-    return BidirectionalStreamingCall(
+    return self.makeBidirectionalStreamingCall(
+      serializer: GRPCPayloadSerializer(),
+      deserializer: GRPCPayloadDeserializer(),
       path: path,
-      scheme: self.scheme,
-      authority: self.authority,
       callOptions: callOptions,
-      eventLoop: self.eventLoop,
-      multiplexer: self.multiplexer,
-      errorDelegate: self.configuration.errorDelegate,
-      logger: self.connectionManager.logger,
       handler: handler
     )
   }
@@ -195,16 +385,35 @@ extension ClientConnection: GRPCChannel {
 // MARK: - Configuration structures
 
 /// A target to connect to.
-public enum ConnectionTarget {
+public struct ConnectionTarget {
+  internal enum Wrapped {
+    case hostAndPort(String, Int)
+    case unixDomainSocket(String)
+    case socketAddress(SocketAddress)
+  }
+
+  internal var wrapped: Wrapped
+  private init(_ wrapped: Wrapped) {
+    self.wrapped = wrapped
+  }
+
   /// The host and port.
-  case hostAndPort(String, Int)
+  public static func hostAndPort(_ host: String, _ port: Int) -> ConnectionTarget {
+    return ConnectionTarget(.hostAndPort(host, port))
+  }
+
   /// The path of a Unix domain socket.
-  case unixDomainSocket(String)
+  public static func unixDomainSocket(_ path: String) -> ConnectionTarget {
+    return ConnectionTarget(.unixDomainSocket(path))
+  }
+
   /// A NIO socket address.
-  case socketAddress(SocketAddress)
+  public static func socketAddress(_ address: SocketAddress) -> ConnectionTarget {
+    return ConnectionTarget(.socketAddress(address))
+  }
 
   var host: String {
-    switch self {
+    switch self.wrapped {
     case .hostAndPort(let host, _):
       return host
     case .socketAddress(.v4(let address)):
@@ -215,6 +424,38 @@ public enum ConnectionTarget {
       return "localhost"
     }
   }
+}
+
+/// The connectivity behavior to use when starting an RPC.
+public struct CallStartBehavior: Hashable {
+  internal enum Behavior: Hashable {
+    case waitsForConnectivity
+    case fastFailure
+  }
+
+  internal var wrapped: Behavior
+  private init(_ wrapped: Behavior) {
+    self.wrapped = wrapped
+  }
+
+  /// Waits for connectivity (that is, the 'ready' connectivity state) before attempting to start
+  /// an RPC. Doing so may involve multiple connection attempts.
+  ///
+  /// This is the preferred, and default, behaviour.
+  public static let waitsForConnectivity = CallStartBehavior(.waitsForConnectivity)
+
+  /// The 'fast failure' behaviour is intended for cases where users would rather their RPC failed
+  /// quickly rather than waiting for an active connection. The behaviour depends on the current
+  /// connectivity state:
+  ///
+  /// - Idle: a connection attempt will be started and the RPC will fail if that attempt fails.
+  /// - Connecting: a connection attempt is already in progress, the RPC will fail if that attempt
+  ///     fails.
+  /// - Ready: a connection is already active: the RPC will be started using that connection.
+  /// - Transient failure: the last connection or connection attempt failed and gRPC is waiting to
+  ///     connect again. The RPC will fail immediately.
+  /// - Shutdown: the connection is shutdown, the RPC will fail immediately.
+  public static let fastFailure = CallStartBehavior(.fastFailure)
 }
 
 extension ClientConnection {
@@ -234,6 +475,10 @@ extension ClientConnection {
     /// A delegate which is called when the connectivity state is changed.
     public var connectivityStateDelegate: ConnectivityStateDelegate?
 
+    /// The `DispatchQueue` on which to call the connectivity state delegate. If a delegate is
+    /// provided but the queue is `nil` then one will be created by gRPC.
+    public var connectivityStateDelegateQueue: DispatchQueue?
+
     /// TLS configuration for this connection. `nil` if TLS is not desired.
     public var tls: TLS?
 
@@ -241,12 +486,19 @@ extension ClientConnection {
     /// be `nil`.
     public var connectionBackoff: ConnectionBackoff?
 
+    /// The connection keepalive configuration.
+    public var connectionKeepalive: ClientConnectionKeepalive
+
     /// The amount of time to wait before closing the connection. The idle timeout will start only
     /// if there are no RPCs in progress and will be cancelled as soon as any RPCs start.
     ///
     /// If a connection becomes idle, starting a new RPC will automatically create a new connection.
     public var connectionIdleTimeout: TimeAmount
-    
+
+    /// The behavior used to determine when an RPC should start. That is, whether it should wait for
+    /// an active connection or fail quickly if no connection is currently available.
+    public var callStartBehavior: CallStartBehavior
+
     /// The HTTP/2 flow control target window size.
     public var httpTargetWindowSize: Int
 
@@ -264,27 +516,38 @@ extension ClientConnection {
     /// - Parameter errorDelegate: The error delegate, defaulting to a delegate which will log only
     ///     on debug builds.
     /// - Parameter connectivityStateDelegate: A connectivity state delegate, defaulting to `nil`.
-    /// - Parameter tlsConfiguration: TLS configuration, defaulting to `nil`.
+    /// - Parameter connectivityStateDelegateQueue: A `DispatchQueue` on which to call the
+    ///     `connectivityStateDelegate`.
+    /// - Parameter tls: TLS configuration, defaulting to `nil`.
     /// - Parameter connectionBackoff: The connection backoff configuration to use.
-    /// - Parameter messageEncoding: Message compression configuration, defaults to no compression.
-    /// - Parameter targetWindowSize: The HTTP/2 flow control target window size.
+    /// - Parameter connectionKeepalive: The keepalive configuration to use.
+    /// - Parameter connectionIdleTimeout: The amount of time to wait before closing the connection, defaulting to 5 minutes.
+    /// - Parameter callStartBehavior: The behavior used to determine when a call should start in
+    ///     relation to its underlying connection. Defaults to `waitsForConnectivity`.
+    /// - Parameter httpTargetWindowSize: The HTTP/2 flow control target window size.
     public init(
       target: ConnectionTarget,
       eventLoopGroup: EventLoopGroup,
       errorDelegate: ClientErrorDelegate? = LoggingClientErrorDelegate(),
       connectivityStateDelegate: ConnectivityStateDelegate? = nil,
+      connectivityStateDelegateQueue: DispatchQueue? = nil,
       tls: Configuration.TLS? = nil,
       connectionBackoff: ConnectionBackoff? = ConnectionBackoff(),
+      connectionKeepalive: ClientConnectionKeepalive = ClientConnectionKeepalive(),
       connectionIdleTimeout: TimeAmount = .minutes(5),
+      callStartBehavior: CallStartBehavior = .waitsForConnectivity,
       httpTargetWindowSize: Int = 65535
     ) {
       self.target = target
       self.eventLoopGroup = eventLoopGroup
       self.errorDelegate = errorDelegate
       self.connectivityStateDelegate = connectivityStateDelegate
+      self.connectivityStateDelegateQueue = connectivityStateDelegateQueue
       self.tls = tls
       self.connectionBackoff = connectionBackoff
+      self.connectionKeepalive = connectionKeepalive
       self.connectionIdleTimeout = connectionIdleTimeout
+      self.callStartBehavior = callStartBehavior
       self.httpTargetWindowSize = httpTargetWindowSize
     }
   }
@@ -297,7 +560,7 @@ extension ClientBootstrapProtocol {
   ///
   /// - Parameter target: The target to connect to.
   func connect(to target: ConnectionTarget) -> EventLoopFuture<Channel> {
-    switch target {
+    switch target.wrapped {
     case .hostAndPort(let host, let port):
       return self.connect(host: host, port: port)
 
@@ -342,6 +605,7 @@ extension Channel {
     tlsConfiguration: TLSConfiguration?,
     tlsServerHostname: String?,
     connectionManager: ConnectionManager,
+    connectionKeepalive: ClientConnectionKeepalive,
     connectionIdleTimeout: TimeAmount,
     errorDelegate: ClientErrorDelegate?,
     logger: Logger
@@ -354,8 +618,9 @@ extension Channel {
       self.configureHTTP2Pipeline(mode: .client, targetWindowSize: httpTargetWindowSize)
     }.flatMap { _ in
       return self.pipeline.handler(type: NIOHTTP2Handler.self).flatMap { http2Handler in
-        self.pipeline.addHandler(
-          GRPCIdleHandler(mode: .client(connectionManager), idleTimeout: connectionIdleTimeout),
+        self.pipeline.addHandlers([
+          GRPCClientKeepaliveHandler(configuration: connectionKeepalive),
+          GRPCIdleHandler(mode: .client(connectionManager), idleTimeout: connectionIdleTimeout)],
           position: .after(http2Handler)
         )
       }.flatMap {
@@ -392,7 +657,7 @@ extension String {
     // We need some scratch space to let inet_pton write into.
     var ipv4Addr = in_addr()
     var ipv6Addr = in6_addr()
-    
+
     return self.withCString { ptr in
       return inet_pton(AF_INET, ptr, &ipv4Addr) == 1 ||
         inet_pton(AF_INET6, ptr, &ipv6Addr) == 1

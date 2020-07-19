@@ -13,18 +13,8 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-import SwiftProtobuf
-import SwiftProtobufPluginLibrary
+import NIOHTTP2
 
-extension Generator {
-  internal func printProtobufExtensions() {
-    if self.file.messages.isEmpty {
-      return
-    }
-    println("// Provides conformance to `GRPCPayload`")
-    for message in self.file.messages {
-      let name = self.protobufNamer.fullName(message: message)
-      self.println("extension \(name): GRPCProtobufPayload {}")
-    }
-  }
+/// A `ConnectionIdledEvent` is fired whenever a connection has expired (keepalive).
+struct ConnectionIdledEvent: Hashable {
 }

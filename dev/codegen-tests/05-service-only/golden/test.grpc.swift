@@ -28,11 +28,35 @@ import SwiftProtobuf
 
 
 /// Usage: instantiate Codegentest_FooClient, then call methods of this protocol to make API calls.
-internal protocol Codegentest_FooClientProtocol {
-  func bar(_ request: SwiftProtobuf.Google_Protobuf_Empty, callOptions: CallOptions?) -> UnaryCall<SwiftProtobuf.Google_Protobuf_Empty, SwiftProtobuf.Google_Protobuf_Empty>
+internal protocol Codegentest_FooClientProtocol: GRPCClient {
+  func bar(
+    _ request: SwiftProtobuf.Google_Protobuf_Empty,
+    callOptions: CallOptions?
+  ) -> UnaryCall<SwiftProtobuf.Google_Protobuf_Empty, SwiftProtobuf.Google_Protobuf_Empty>
+
 }
 
-internal final class Codegentest_FooClient: GRPCClient, Codegentest_FooClientProtocol {
+extension Codegentest_FooClientProtocol {
+
+  /// Unary call to Bar
+  ///
+  /// - Parameters:
+  ///   - request: Request to send to Bar.
+  ///   - callOptions: Call options.
+  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
+  internal func bar(
+    _ request: SwiftProtobuf.Google_Protobuf_Empty,
+    callOptions: CallOptions? = nil
+  ) -> UnaryCall<SwiftProtobuf.Google_Protobuf_Empty, SwiftProtobuf.Google_Protobuf_Empty> {
+    return self.makeUnaryCall(
+      path: "/codegentest.Foo/Bar",
+      request: request,
+      callOptions: callOptions ?? self.defaultCallOptions
+    )
+  }
+}
+
+internal final class Codegentest_FooClient: Codegentest_FooClientProtocol {
   internal let channel: GRPCChannel
   internal var defaultCallOptions: CallOptions
 
@@ -45,19 +69,6 @@ internal final class Codegentest_FooClient: GRPCClient, Codegentest_FooClientPro
     self.channel = channel
     self.defaultCallOptions = defaultCallOptions
   }
-
-  /// Unary call to Bar
-  ///
-  /// - Parameters:
-  ///   - request: Request to send to Bar.
-  ///   - callOptions: Call options; `self.defaultCallOptions` is used if `nil`.
-  /// - Returns: A `UnaryCall` with futures for the metadata, status and response.
-  internal func bar(_ request: SwiftProtobuf.Google_Protobuf_Empty, callOptions: CallOptions? = nil) -> UnaryCall<SwiftProtobuf.Google_Protobuf_Empty, SwiftProtobuf.Google_Protobuf_Empty> {
-    return self.makeUnaryCall(path: "/codegentest.Foo/Bar",
-                              request: request,
-                              callOptions: callOptions ?? self.defaultCallOptions)
-  }
-
 }
 
 /// To build a server, implement a class that conforms to this protocol.
@@ -73,7 +84,7 @@ extension Codegentest_FooProvider {
   internal func handleMethod(_ methodName: String, callHandlerContext: CallHandlerContext) -> GRPCCallHandler? {
     switch methodName {
     case "Bar":
-      return UnaryCallHandler(callHandlerContext: callHandlerContext) { context in
+      return CallHandlerFactory.makeUnary(callHandlerContext: callHandlerContext) { context in
         return { request in
           self.bar(request: request, context: context)
         }
@@ -83,5 +94,4 @@ extension Codegentest_FooProvider {
     }
   }
 }
-
 

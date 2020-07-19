@@ -212,7 +212,10 @@ internal class ConnectionManager {
     let eventLoop = configuration.eventLoopGroup.next()
     self.eventLoop = eventLoop
     self.state = .idle(IdleState(configuration: configuration))
-    self.monitor = ConnectivityStateMonitor(delegate: configuration.connectivityStateDelegate)
+    self.monitor = ConnectivityStateMonitor(
+      delegate: configuration.connectivityStateDelegate,
+      queue: configuration.connectivityStateDelegateQueue
+    )
 
     self.channelProvider = channelProvider
 
@@ -244,6 +247,39 @@ internal class ConnectionManager {
 
       case .transientFailure(let state):
         return state.readyChannelPromise.futureResult
+
+      case .shutdown:
+        return self.eventLoop.makeFailedFuture(GRPCStatus(code: .unavailable, message: nil))
+      }
+    }
+  }
+
+  /// Returns a future for the current channel, or future channel from the current connection
+  /// attempt, or if the state is 'idle' returns the future for the next connection attempt.
+  ///
+  /// Note: if the state is 'transientFailure' or 'shutdown' then a failed future will be returned.
+  internal func getOptimisticChannel() -> EventLoopFuture<Channel> {
+    return self.eventLoop.flatSubmit {
+      switch self.state {
+      case .idle:
+        self.startConnecting()
+        // We started connecting so we must transition to the `connecting` state.
+        guard case .connecting(let connecting) = self.state else {
+          self.invalidState()
+        }
+        return connecting.candidate
+
+      case .connecting(let state):
+        return state.candidate
+
+      case .active(let state):
+        return state.candidate.eventLoop.makeSucceededFuture(state.candidate)
+
+      case .ready(let state):
+        return state.channel.eventLoop.makeSucceededFuture(state.channel)
+
+      case .transientFailure:
+        return self.eventLoop.makeFailedFuture(ChannelError.ioOnClosedChannel)
 
       case .shutdown:
         return self.eventLoop.makeFailedFuture(GRPCStatus(code: .unavailable, message: nil))
@@ -559,6 +595,7 @@ extension ConnectionManager {
           tlsConfiguration: configuration.tls?.configuration,
           tlsServerHostname: serverHostname,
           connectionManager: self,
+          connectionKeepalive: configuration.connectionKeepalive,
           connectionIdleTimeout: configuration.connectionIdleTimeout,
           errorDelegate: configuration.errorDelegate,
           logger: self.logger

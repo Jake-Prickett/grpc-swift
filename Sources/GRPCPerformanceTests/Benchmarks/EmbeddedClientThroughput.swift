@@ -45,7 +45,7 @@ class EmbeddedClientThroughput: Benchmark {
       scheme: "http",
       path: "/echo.Echo/Get",
       host: "localhost",
-      timeout: .infinite,
+      deadline: .distantFuture,
       customMetadata: [:],
       encoding: .disabled
     )
@@ -61,13 +61,21 @@ class EmbeddedClientThroughput: Benchmark {
   func run() throws {
     for _ in 0..<self.requestCount {
       let channel = EmbeddedChannel()
-      try channel.pipeline.addHandlers([
-        _GRPCClientChannelHandler<Echo_EchoRequest, Echo_EchoResponse>(streamID: .init(1), callType: .unary, logger: self.logger),
-        _UnaryRequestChannelHandler(requestHead: self.requestHead, request: .init(self.request, compressed: false))
-      ]).wait()
+
+      try channel._configureForEmbeddedThroughputTest(
+        callType: .unary,
+        logger: self.logger,
+        requestType: Echo_EchoRequest.self,
+        responseType: Echo_EchoResponse.self
+      ).wait()
 
       // Trigger the request handler.
       channel.pipeline.fireChannelActive()
+
+      // Write the request parts.
+      try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.head(self.requestHead))
+      try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.message(.init(self.request, compressed: false)))
+      try channel.writeOutbound(_GRPCClientRequestPart<Echo_EchoRequest>.end)
 
       // Read out the request frames.
       var requestFrames = 0

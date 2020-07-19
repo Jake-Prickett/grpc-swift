@@ -18,24 +18,29 @@ import NIO
 import NIOHTTP1
 import NIOFoundationCompat
 import Logging
+import SwiftProtobuf
 
 /// Incoming gRPC package with a fixed message type.
 ///
 /// - Important: This is **NOT** part of the public API.
-public enum _GRPCServerRequestPart<RequestPayload: GRPCPayload> {
+public enum _GRPCServerRequestPart<Request> {
   case head(HTTPRequestHead)
-  case message(RequestPayload)
+  case message(Request)
   case end
 }
+
+public typealias _RawGRPCServerRequestPart = _GRPCServerRequestPart<ByteBuffer>
 
 /// Outgoing gRPC package with a fixed message type.
 ///
 /// - Important: This is **NOT** part of the public API.
-public enum _GRPCServerResponsePart<ResponsePayload: GRPCPayload> {
+public enum _GRPCServerResponsePart<Response> {
   case headers(HTTPHeaders)
-  case message(_MessageContext<ResponsePayload>)
+  case message(_MessageContext<Response>)
   case statusAndTrailers(GRPCStatus, HTTPHeaders)
 }
+
+public typealias _RawGRPCServerResponsePart = _GRPCServerResponsePart<ByteBuffer>
 
 /// A simple channel handler that translates HTTP1 data types into gRPC packets, and vice versa.
 ///
@@ -44,7 +49,7 @@ public enum _GRPCServerResponsePart<ResponsePayload: GRPCPayload> {
 /// gRPC-Web (gRPC over HTTP1).
 ///
 /// The translation from HTTP2 to HTTP1 is done by `HTTP2ToHTTP1ServerCodec`.
-public final class HTTP1ToGRPCServerCodec<Request: GRPCPayload, Response: GRPCPayload> {
+public final class HTTP1ToGRPCServerCodec {
   public init(encoding: ServerMessageEncoding, logger: Logger) {
     self.encoding = encoding
     self.encodingHeaderValidator = MessageEncodingHeaderValidator(encoding: encoding)
@@ -82,7 +87,7 @@ public final class HTTP1ToGRPCServerCodec<Request: GRPCPayload, Response: GRPCPa
   // TODO(kaipi): Extract all gRPC Web processing logic into an independent handler only added on
   // the HTTP1.1 pipeline, as it's starting to get in the way of readability.
   private var requestTextBuffer: NIO.ByteBuffer!
-  private var responseTextBuffer: NIO.ByteBuffer!
+  private var responseTextBuffers: CircularBuffer<ByteBuffer> = []
 
   var inboundState = InboundState.expectingHeaders {
     willSet {
@@ -118,7 +123,7 @@ extension HTTP1ToGRPCServerCodec {
 
 extension HTTP1ToGRPCServerCodec: ChannelInboundHandler {
   public typealias InboundIn = HTTPServerRequestPart
-  public typealias InboundOut = _GRPCServerRequestPart<Request>
+  public typealias InboundOut = _RawGRPCServerRequestPart
 
   public func channelRead(context: ChannelHandlerContext, data: NIOAny) {
     if case .ignore = inboundState {
@@ -247,10 +252,10 @@ extension HTTP1ToGRPCServerCodec: ChannelInboundHandler {
     }
 
     self.messageReader.append(buffer: &body)
-    var requests: [Request] = []
+    var requests: [ByteBuffer] = []
     do {
-      while var buffer = try self.messageReader.nextMessage() {
-        requests.append(try Request(serializedByteBuffer: &buffer))
+      while let buffer = try self.messageReader.nextMessage() {
+        requests.append(buffer)
       }
     } catch let grpcError as GRPCError.WithContext {
       context.fireErrorCaught(grpcError)
@@ -280,7 +285,7 @@ extension HTTP1ToGRPCServerCodec: ChannelInboundHandler {
 }
 
 extension HTTP1ToGRPCServerCodec: ChannelOutboundHandler {
-  public typealias OutboundIn = _GRPCServerResponsePart<Response>
+  public typealias OutboundIn = _RawGRPCServerResponsePart
   public typealias OutboundOut = HTTPServerResponsePart
 
   public func write(context: ChannelHandlerContext, data: NIOAny, promise: EventLoopPromise<Void>?) {
@@ -304,10 +309,6 @@ extension HTTP1ToGRPCServerCodec: ChannelOutboundHandler {
         if contentType != .protobuf {
           version = .init(major: 1, minor: 1)
         }
-      }
-
-      if self.contentType == .webTextProtobuf {
-        responseTextBuffer = context.channel.allocator.buffer(capacity: 0)
       }
 
       // Are we compressing responses?
@@ -335,24 +336,23 @@ extension HTTP1ToGRPCServerCodec: ChannelOutboundHandler {
           // Store the response into an independent buffer. We can't return the message directly as
           // it needs to be aggregated with all the responses plus the trailers, in order to have
           // the base64 response properly encoded in a single byte stream.
-          precondition(self.responseTextBuffer != nil)
-          try self.messageWriter.write(
-            messageContext.message,
-            into: &self.responseTextBuffer,
+          let buffer = try self.messageWriter.write(
+            buffer: messageContext.message,
+            allocator: context.channel.allocator,
             compressed: messageContext.compressed
           )
+          self.responseTextBuffers.append(buffer)
 
           // Since we stored the written data, mark the write promise as successful so that the
           // ServerStreaming provider continues sending the data.
           promise?.succeed(())
         } else {
-          var lengthPrefixedMessageBuffer = context.channel.allocator.buffer(capacity: 0)
-          try self.messageWriter.write(
-            messageContext.message,
-            into: &lengthPrefixedMessageBuffer,
+          let messageBuffer = try self.messageWriter.write(
+            buffer: messageContext.message,
+            allocator: context.channel.allocator,
             compressed: messageContext.compressed
           )
-          context.write(self.wrapOutboundOut(.body(.byteBuffer(lengthPrefixedMessageBuffer))), promise: promise)
+          context.write(self.wrapOutboundOut(.body(.byteBuffer(messageBuffer))), promise: promise)
         }
       } catch {
         let error = GRPCError.SerializationFailure().captureContext()
@@ -379,25 +379,38 @@ extension HTTP1ToGRPCServerCodec: ChannelOutboundHandler {
       }
 
       if contentType == .webTextProtobuf {
-        precondition(responseTextBuffer != nil)
-
         // Encode the trailers into the response byte stream as a length delimited message, as per
         // https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md
         let textTrailers = trailers.map { name, value in "\(name): \(value)" }.joined(separator: "\r\n")
-        responseTextBuffer.writeInteger(UInt8(0x80))
-        responseTextBuffer.writeInteger(UInt32(textTrailers.utf8.count))
-        responseTextBuffer.writeString(textTrailers)
+        var trailersBuffer = context.channel.allocator.buffer(capacity: 5 + textTrailers.utf8.count)
+        trailersBuffer.writeInteger(UInt8(0x80))
+        trailersBuffer.writeInteger(UInt32(textTrailers.utf8.count))
+        trailersBuffer.writeString(textTrailers)
+        self.responseTextBuffers.append(trailersBuffer)
+
+        // The '!' is fine, we know it's not empty since we just added a buffer.
+        var responseTextBuffer = self.responseTextBuffers.popFirst()!
+
+        // Read the data from the first buffer.
+        var accumulatedData = responseTextBuffer.readData(length: responseTextBuffer.readableBytes)!
+
+        // Reserve enough capacity and append the remaining buffers.
+        let requiredExtraCapacity = self.responseTextBuffers.lazy.map { $0.readableBytes }.reduce(0, +)
+        accumulatedData.reserveCapacity(accumulatedData.count + requiredExtraCapacity)
+        while let buffer = self.responseTextBuffers.popFirst() {
+          accumulatedData.append(contentsOf: buffer.readableBytesView)
+        }
 
         // TODO: Binary responses that are non multiples of 3 will end = or == when encoded in
         // base64. Investigate whether this might have any effect on the transport mechanism and
-        // client decoding. Initial results say that they are inocuous, but we might have to keep
+        // client decoding. Initial results say that they are innocuous, but we might have to keep
         // an eye on this in case something trips up.
-        if let binaryData = responseTextBuffer.readData(length: responseTextBuffer.readableBytes) {
-          let encodedData = binaryData.base64EncodedString()
-          responseTextBuffer.clear()
-          responseTextBuffer.reserveCapacity(encodedData.utf8.count)
-          responseTextBuffer.writeString(encodedData)
-        }
+        let encodedData = accumulatedData.base64EncodedString()
+
+        // Reuse our first buffer.
+        responseTextBuffer.clear(minimumCapacity: numericCast(encodedData.utf8.count))
+        responseTextBuffer.writeString(encodedData)
+
         // After collecting all response for gRPC Web connections, send one final aggregated
         // response.
         context.write(self.wrapOutboundOut(.body(.byteBuffer(responseTextBuffer))), promise: promise)
